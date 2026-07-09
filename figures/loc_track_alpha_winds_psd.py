@@ -80,6 +80,7 @@ ibtracs = tracks.TrackDataset(basin='all',source='ibtracs',ibtracs_mode='jtwc_ne
 
 
 
+
 ###########################################################################################
 ######------> Wind stress stick plot <----###################################################################
 us = avg_1km.sustr.isel(ocean_time=slice(65,None))
@@ -98,6 +99,16 @@ A = [380, 1233]
 B = [276, 896]
 C = [333, 557]
 D = [453, 323]
+
+
+#h[1233, 380] #1002
+#
+#h[896, 276] #934
+#
+#h[557, 333] #968
+#
+#h[323, 453] #941
+
 
 
 def apply_rotation(u, v, angle_rad):
@@ -230,17 +241,17 @@ lat_a = a_r.lat_rho
 
 
 
-
-###########################################################################
-####################-----> SSH tidal definition <---#######################
-from scipy.signal import butter, filtfilt, hilbert
-# 1. Define coordinates [xi_rho, eta_rho]
 coords = {
 	'A': [380, 1233],
 	'B': [276, 896],
 	'C': [333, 557],
 	'D': [453, 323]
 }
+###########################################################################
+####################-----> SSH tidal definition <---#######################
+from scipy.signal import butter, filtfilt, hilbert
+# 1. Define coordinates [xi_rho, eta_rho]
+
 # 2. Helper function for a semi-diurnal bandpass filter (covers M2 and S2)
 def semi_diurnal_bandpass(data, dt_hours):
 	nyquist = 0.5 * (1.0 / dt_hours)
@@ -346,23 +357,64 @@ def format_time_axis(ax):
 	ax.tick_params(axis='x', labelsize=10, rotation=25)
 	ax.set_xlabel(None)
 
+#########################################################
+#####----> Catarina blend Track <---##########################
 
+ibtracs = tracks.TrackDataset(basin='all',source='ibtracs',ibtracs_mode='jtwc_neumann',catarina=True)
+
+storm = ibtracs.get_storm(('catarina',2004))
+#m/s we multiply knots by 0.5144444444
+vmax_cat = storm.vmax *0.5144444444 
+time_cat = storm.time
+
+KT2MS = 0.5144444444
+WIND_AVG_FACTOR = 0.93   # 1-min sustained to equivalent-neutral scaling
+ALPHA_TRANS = 0.55       # Translation asymmetry weight
+OMEGA = 7.2921e-5        # Earth's angular velocity (rad/s)
+RMW_BT_KM = 20.0         # Rmax in km
+
+# 1. Pull best track data from tropycal
+t = pd.to_datetime(storm.time)
+lat = np.asarray(storm.lat, float)
+lon = np.asarray(storm.lon, float)
+vmax_bt = np.asarray(storm.vmax, float) * KT2MS
+
+# 2. Calculate storm translation velocity (V_trans) using centered differences
+ts = np.asarray((t - t[0]).total_seconds())   # float seconds, resolution-proof
+dxe = np.gradient(lon) * 111320.0 * np.cos(np.deg2rad(lat))
+dyn = np.gradient(lat) * 111320.0
+dts = np.gradient(ts)
+
+utr = dxe / dts
+vtr = dyn / dts
+v_trans = np.hypot(utr, vtr)  # Translation speed in m/s
+
+# 3. Calculate Coriolis parameter |f| for each latitude step
+f = 2.0 * OMEGA * np.sin(np.deg2rad(lat))
+abs_f = np.abs(f)
+
+# 4. Step A: Back out background forward motion to find the symmetric intensity
+vmax_sym = np.maximum(vmax_bt * WIND_AVG_FACTOR - ALPHA_TRANS * v_trans, 5.0)
+
+# 5. Step B: Evaluate the Holland core equation at r = Rmax (Gradient Balance)
+rmax_m = RMW_BT_KM * 1000.0  # Convert km to meters
+v_gradient_max = np.sqrt(vmax_sym**2 + (rmax_m * abs_f / 2.0)**2) - (rmax_m * abs_f / 2.0)
+
+# 6. Step C: Add back translation asymmetry at the peak eyewall vector location
+vmax_blend = v_gradient_max + ALPHA_TRANS * v_trans
 
 
 ###########################################################################
 ####################-----> Plotting <---###############################
 
 
-fig = plt.figure(figsize=(9, 12)) #width, height
+fig = plt.figure(figsize=(9, 12)) 
 gs = gridspec.GridSpec(nrows=4, ncols=2, height_ratios=[3,3,2,2], width_ratios=[1,1])
-gs.update(left=0.08, right=0.98,hspace=0.2, wspace=0.1, top=0.98, bottom=0.05)
+gs.update(left=0.08, right=0.98, hspace=0.2, wspace=0.1, top=0.98, bottom=0.05)
 
-
-##############------> PSD
+##############------> PSD (Spans all 3 columns automatically via :)
 colors = {'A': 'k', 'B': 'blue', 'C': 'orange', 'D': 'red'}
-
 ax_g = plt.subplot(gs[2, :])
-
 ax_g.text(0.02, 0.92, '(e)', transform=ax_g.transAxes, fontsize=10, fontweight='bold')
 
 dof = 5.0  
@@ -627,7 +679,6 @@ ax2.text(0.7, 0.98, '(b)', transform=ax2.transAxes, fontsize=10, fontweight='bol
 
 
 ###########---> Plotting the hurricane track
-storm = ibtracs.get_storm(('catarina',2004))
 
 
 type_colors = {
@@ -703,6 +754,34 @@ ax2.scatter(storm.lon[-1], storm.lat[-1],
 
 
 ax2.legend(loc='upper left', fontsize=6,  title_fontsize=6)
+
+###---> vamx
+pcx = inset_axes(ax2, width="50%", height="30%", loc='lower left',
+				 bbox_to_anchor=(0.1, 0.05, 0.96, 0.95), 
+				 bbox_transform=ax2.transAxes)
+
+# Give it a solid background so map lines don't bleed through
+pcx.set_facecolor('white')
+pcx.patch.set_alpha(0.9) 
+
+# Inverted data: Vmax on X-axis, Time on Y-axis
+pcx.plot(time_cat, vmax_cat, label='Track', linestyle=':', color='green', linewidth=1.2)
+pcx.plot(time_cat,vmax_blend, label='Blend', linestyle='--', color='orange', linewidth=1.2)
+
+# Formatting the inset
+pcx.set_ylim(10, 45)
+pcx.set_ylabel(r'V$_{max}$ (m s$^{-1}$)', fontsize=7)
+pcx.tick_params(axis='both', labelsize=7)
+
+# Handle time formatting on the Y-axis instead of X
+pcx.xaxis.set_major_locator(mdates.DayLocator(interval=3))
+pcx.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+
+pcx.grid(True, linestyle=':', alpha=0.5)
+pcx.legend(loc=2, fontsize=6, frameon=False)
+
+
+
 
 ####################_---> Alpha ratio
 
